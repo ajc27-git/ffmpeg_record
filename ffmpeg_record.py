@@ -76,12 +76,23 @@ def setup_camera(device, name, fps):
     ]
 
     # Set exposure level according to device name
-    if "EMEET" in name:
-        commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=10"])
-    elif "Global Shutter" in name:
-        commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=80"])
+    # if "EMEET" in name:
+    #     commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=10"])
+    # elif "Global Shutter" in name:
+    #     commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=80"])
+    # elif "HD Camera" in name:
+    #     commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=240"])
+    # else:
+    #     commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=120"])
+
+    if "/dev/video2" == device:
+        commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=150"])
+    elif "/dev/video4" == device:
+        commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=150"])
+    elif "/dev/video6" == device:
+        commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=150"])
     else:
-        commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=120"])
+        commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=150"])
     
     for cmd in commands:
         try:
@@ -98,8 +109,22 @@ if not cameras:
     sys.exit(1)
 
 print(f"✅ Cameras detected: {len(cameras)}")
-for c in cameras:
-    print(f"   - {c['device']} -> {c['output']}")
+for i, c in enumerate(cameras):
+    print(f"   {i}) {c['device']} -> {c['output']}")
+
+selected_input = input("\nSelect cameras by comma-separated digits (e.g., 0,2) or press Enter for all: ").strip()
+if selected_input:
+    try:
+        indices = [int(x.strip()) for x in selected_input.split(',')]
+        cameras = [cameras[i] for i in indices if 0 <= i < len(cameras)]
+        print(f"✅ Using selected cameras: {len(cameras)}")
+        for c in cameras:
+            print(f"   - {c['device']} -> {c['output']}")
+        if not cameras:
+            print("❌ No valid cameras selected.")
+            sys.exit(1)
+    except ValueError:
+        print("❌ Invalid input. Using all cameras.")
 
 # ===== Monitor FPS =====
 def monitor_fps(process, camera_id):
@@ -127,7 +152,7 @@ def monitor_fps(process, camera_id):
     thread.start()
 
 # ===== Main Recording Function =====
-def start_recording(use_format="mjpeg", fps=90):
+def start_recording(use_format="mjpeg", fps=90, resolution="1920x1080"):
     """Start recording with a specific format"""
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -137,7 +162,7 @@ def start_recording(use_format="mjpeg", fps=90):
     input_params_mjpeg = [
         "-f", "v4l2",
         "-input_format", "mjpeg",
-        "-video_size", "1920x1080",
+        "-video_size", resolution,
         # "-video_size", "1280x720",
         "-framerate", str(fps),
         "-use_wallclock_as_timestamps", "1",  # Use system clock
@@ -147,9 +172,10 @@ def start_recording(use_format="mjpeg", fps=90):
     ]
 
     output_params_mjpeg = [
-        "-c:v", "copy",  # Copy MJPEG stream directly
-        "-r", str(fps),
-        "-vsync", "passthrough",  # Pass original timestamps
+        "-c:v", "copy",  # Just copy the stream (Fastest)
+        # "-c:v", "mjpeg",  # Re-encode to allow frame dropping
+        # "-q:v", "3",      # Maintain high quality
+        # "-r", str(fps),   # Force target framerate (drops frames if necessary)
         "-an",
         "-y",
         "-f", "avi"  # Force AVI format
@@ -159,7 +185,7 @@ def start_recording(use_format="mjpeg", fps=90):
     input_params_yuyv = [
         "-f", "v4l2",
         "-input_format", "yuyv422",  # RAW Format
-        "-video_size", "1920x1200",
+        "-video_size", resolution,
         "-framerate", str(fps),
         "-use_wallclock_as_timestamps", "1",
         "-i"
@@ -179,7 +205,7 @@ def start_recording(use_format="mjpeg", fps=90):
     input_params_interval = [
         "-f", "v4l2",
         "-input_format", "mjpeg",
-        "-video_size", "1920x1200",
+        "-video_size", resolution,
         "-framerate", str(fps),
         "-re",  # Read input at native framerate
         "-use_wallclock_as_timestamps", "1",
@@ -313,9 +339,38 @@ if __name__ == "__main__":
         use_format = "yuyv"
     else:
         use_format = "interval"
+        
+    # Select resolution
+    print("\n📐 Select video resolution:")
+    print("  1) 1920x1080 (default)")
+    print("  2) 1280x960")
+    print("  3) 1280x720")
+    print("  4) 1920x1200")
+    res_choice = input("Resolution [1-4]: ").strip()
+    
+    if res_choice == "2":
+        resolution = "1280x960"
+    elif res_choice == "3":
+        resolution = "1280x720"
+    elif res_choice == "4":
+        resolution = "1920x1200"
+    else:
+        resolution = "1920x1080"
+    
+    print("\n⏳ Add a delay before starting (in seconds)?")
+    delay_input = input("Delay (default 0): ").strip()
+    delay_seconds = int(delay_input) if delay_input.isdigit() else 0
     
     # Create commands
-    ffmpeg_cmds = start_recording(use_format, fps)
+    ffmpeg_cmds = start_recording(use_format, fps, resolution)
+    
+    if delay_seconds > 0:
+        print(f"\n⏳ Delaying start for {delay_seconds} seconds...")
+        for i in range(delay_seconds, 0, -1):
+            sys.stdout.write(f"\r   {i} seconds remaining...  ")
+            sys.stdout.flush()
+            time.sleep(1)
+        print("\n")
     
     # Start recording
     processes = []
