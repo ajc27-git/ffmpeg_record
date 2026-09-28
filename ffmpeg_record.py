@@ -53,9 +53,9 @@ def get_dynamic_cameras():
     return cameras
 
 # ===== CAMERA SETUP =====
-def setup_camera(device, name, fps):
-    """Configure camera for the requested fps"""
-    print(f"\n⚙️  Configuring {device} ({name}) for {fps} fps...")
+def setup_camera(device, name, fps, exposure):
+    """Configure camera for the requested fps and exposure"""
+    print(f"\n⚙️  Configuring {device} ({name}) for {fps} fps and {exposure} exposure...")
     
     # FIRST, reset controls
     commands = [
@@ -75,24 +75,7 @@ def setup_camera(device, name, fps):
         ["v4l2-ctl", "-d", device, "--get-ctrl=exposure_time_absolute"],
     ]
 
-    # Set exposure level according to device name
-    # if "EMEET" in name:
-    #     commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=10"])
-    # elif "Global Shutter" in name:
-    #     commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=80"])
-    # elif "HD Camera" in name:
-    #     commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=240"])
-    # else:
-    #     commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=120"])
-
-    if "/dev/video2" == device:
-        commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=150"])
-    elif "/dev/video4" == device:
-        commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=150"])
-    elif "/dev/video6" == device:
-        commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=150"])
-    else:
-        commands.append(["v4l2-ctl", "-d", device, "--set-ctrl=exposure_time_absolute=150"])
+    commands.append(["v4l2-ctl", "-d", device, f"--set-ctrl=exposure_time_absolute={exposure}"])
     
     for cmd in commands:
         try:
@@ -101,7 +84,33 @@ def setup_camera(device, name, fps):
         except Exception as e:
             print(f"  Error: {e}")
 
+# ===== USB BANDWIDTH QUIRK =====
+def apply_usb_bandwidth_quirk():
+    print("🔧 Applying USB bandwidth quirk (quirks=128)")
+    print("   (You may be asked for sudo password)")
+    try:
+        # Remove the module safely (ignore errors if not loaded)
+        subprocess.run(["sudo", "rmmod", "uvcvideo"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1)
+        
+        # Load module with patch
+        subprocess.run(["sudo", "modprobe", "uvcvideo", "quirks=128"], check=True)
+        time.sleep(2) # Give the system time to recognize the cameras again
+        print("✅ USB patch applied correctly.")
+    except Exception as e:
+        print(f"⚠️ Warning: Could not apply USB patch: {e}")
+
+def restore_usb_bandwidth_quirk():
+    print("\n🔧 Restoring original USB configuration...")
+    try:
+        subprocess.run(["sudo", "rmmod", "uvcvideo"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["sudo", "modprobe", "uvcvideo"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print("✅ Original USB configuration restored.")
+    except Exception:
+        pass
+
 # ===== Dynamic Camera Setup =====
+apply_usb_bandwidth_quirk()
 cameras = get_dynamic_cameras()
 
 if not cameras:
@@ -211,6 +220,22 @@ def start_recording(use_format="mjpeg", fps=90, resolution="1920x1080"):
         "-use_wallclock_as_timestamps", "1",
         "-i"
     ]
+
+    # ===== OPTION 4: NATIVE H264 =====
+    input_params_h264 = [
+        "-f", "v4l2",
+        "-input_format", "h264",
+        "-video_size", resolution,
+        "-framerate", str(fps),
+        "-i"
+    ]
+
+    output_params_h264 = [
+        "-c:v", "copy",
+        "-an",
+        "-y",
+        "-f", "mp4"
+    ]
     
     ffmpeg_cmds = []
     
@@ -223,6 +248,9 @@ def start_recording(use_format="mjpeg", fps=90, resolution="1920x1080"):
         elif use_format == "yuyv":
             cmd.extend(input_params_yuyv)
             output_suffix = f"_{timestamp}_raw.mp4"
+        elif use_format == "h264":
+            cmd.extend(input_params_h264)
+            output_suffix = f"_{timestamp}.mp4"
         else:
             cmd.extend(input_params_interval)
             output_suffix = f"_{timestamp}_interval.avi"
@@ -233,6 +261,8 @@ def start_recording(use_format="mjpeg", fps=90, resolution="1920x1080"):
             cmd.extend(output_params_mjpeg)
         elif use_format == "yuyv":
             cmd.extend(output_params_yuyv)
+        elif use_format == "h264":
+            cmd.extend(output_params_h264)
         else:
             cmd.extend(output_params_mjpeg)
         
@@ -257,7 +287,7 @@ def signal_handler(sig, frame):
         try:
             # Send 'q' to ffmpeg to terminate cleanly
             print(f"   Stopping camera {i}...", end=" ", flush=True)
-            process.stdin.write(b'q')
+            process.stdin.write('q')
             process.stdin.flush()
             process.wait(timeout=10)
             print("Done")
@@ -305,6 +335,9 @@ def signal_handler(sig, frame):
                 print(f"❌ Error: {e}")
                 if os.path.exists(temp_file):
                     os.remove(temp_file)
+                    
+    # Restore USB config on exit
+    restore_usb_bandwidth_quirk()
     
     sys.exit(0)
 
@@ -316,50 +349,93 @@ if __name__ == "__main__":
     print("🎥 RECORDING SYSTEM")
     print("=" * 60)
     
-    # Select framerate
-    print("\n⏱️  Select recording framerate:")
-    fps_input = input("Framerate (default 90): ").strip()
-    fps = int(fps_input) if fps_input.isdigit() else 90
-    
+    print("\n⚙️  Select Configuration Preset:")
+    print("  1) 60fps, H264, 3840x2160, 150exp, 3s")
+    print("  2) 60fps, H264, 2560x1440, 150exp, 3s")
+    print("  3) 60fps, H264, 1920x1080, 150exp, 3s")
+    print("  4) 90fps, MJPEG, 1920x1080, 150exp, 3s")
+    print("  5) Custom")
+    preset_choice = input("\nPreset [1-4] (default 1): ").strip()
+
+    if preset_choice == "1":
+        fps = 60
+        use_format = "h264"
+        resolution = "3840x2160"
+        exposure = 150
+        delay_seconds = 3
+    elif preset_choice == "2":
+        fps = 60
+        use_format = "h264"
+        resolution = "2560x1440"
+        exposure = 150
+        delay_seconds = 3
+    elif preset_choice == "3":
+        fps = 60
+        use_format = "h264"
+        resolution = "1920x1080"
+        exposure = 150
+        delay_seconds = 3
+    elif preset_choice == "4":
+        fps = 90
+        use_format = "mjpeg"
+        resolution = "1920x1080"
+        exposure = 150
+        delay_seconds = 3
+    else:
+        # Select framerate
+        print("\n⏱️  Select recording framerate:")
+        fps_input = input("Framerate (default 90): ").strip()
+        fps = int(fps_input) if fps_input.isdigit() else 90
+        
+        # Select format
+        print("\n📋 Select recording format:")
+        print("  1) Native MJPEG (recommended, lower CPU)")
+        print("  2) YUYV raw + H.264 (better compatibility)")
+        print("  3) Force 0.011s interval")
+        print("  4) Native H.264")
+        
+        choice = input("\nOption [1-4]: ").strip()
+        
+        if choice == "1":
+            use_format = "mjpeg"
+        elif choice == "2":
+            use_format = "yuyv"
+        elif choice == "4":
+            use_format = "h264"
+        else:
+            use_format = "interval"
+            
+        # Select resolution
+        print("\n📐 Select video resolution:")
+        print("  1) 1920x1080 (default)")
+        print("  2) 1280x960")
+        print("  3) 1280x720")
+        print("  4) 1920x1200")
+        print("  5) 3840x2160")
+        res_choice = input("Resolution [1-5]: ").strip()
+        
+        if res_choice == "2":
+            resolution = "1280x960"
+        elif res_choice == "3":
+            resolution = "1280x720"
+        elif res_choice == "4":
+            resolution = "1920x1200"
+        elif res_choice == "5":
+            resolution = "3840x2160"
+        else:
+            resolution = "1920x1080"
+            
+        print("\n💡 Set manual exposure (exposure_time_absolute)?")
+        exposure_input = input("Exposure (default 150): ").strip()
+        exposure = int(exposure_input) if exposure_input.isdigit() else 150
+        
+        print("\n⏳ Add a delay before starting (in seconds)?")
+        delay_input = input("Delay (default 0): ").strip()
+        delay_seconds = int(delay_input) if delay_input.isdigit() else 0
+
     # Configure each camera
     for cam in cameras:
-        setup_camera(cam["device"], cam["name"], fps)
-    
-    # Select format
-    print("\n📋 Select recording format:")
-    print("  1) Native MJPEG (recommended, lower CPU)")
-    print("  2) YUYV raw + H.264 (better compatibility)")
-    print("  3) Force 0.011s interval")
-    
-    choice = input("\nOption [1-3]: ").strip()
-    
-    if choice == "1":
-        use_format = "mjpeg"
-    elif choice == "2":
-        use_format = "yuyv"
-    else:
-        use_format = "interval"
-        
-    # Select resolution
-    print("\n📐 Select video resolution:")
-    print("  1) 1920x1080 (default)")
-    print("  2) 1280x960")
-    print("  3) 1280x720")
-    print("  4) 1920x1200")
-    res_choice = input("Resolution [1-4]: ").strip()
-    
-    if res_choice == "2":
-        resolution = "1280x960"
-    elif res_choice == "3":
-        resolution = "1280x720"
-    elif res_choice == "4":
-        resolution = "1920x1200"
-    else:
-        resolution = "1920x1080"
-    
-    print("\n⏳ Add a delay before starting (in seconds)?")
-    delay_input = input("Delay (default 0): ").strip()
-    delay_seconds = int(delay_input) if delay_input.isdigit() else 0
+        setup_camera(cam["device"], cam["name"], fps, exposure)
     
     # Create commands
     ffmpeg_cmds = start_recording(use_format, fps, resolution)
